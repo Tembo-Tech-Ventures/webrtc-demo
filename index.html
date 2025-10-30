@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Chat Room</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+        video {
+            width: 100%;
+            height: auto;
+            background: #000;
+            border-radius: 0.5rem;
+        }
+        .chat-messages {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-gray-800 mb-2">WebRTC Chat Room</h1>
+            <p class="text-gray-600" id="roomInfo">Loading...</p>
+        </header>
+
+        <!-- Room Entry (shown when no room specified) -->
+        <div id="roomEntry" class="max-w-md mx-auto bg-white rounded-lg shadow-lg p-6 hidden">
+            <h2 class="text-2xl font-semibold mb-4 text-gray-800">Join or Create a Room</h2>
+            <div class="space-y-4">
+                <div>
+                    <label for="roomNameInput" class="block text-sm font-medium text-gray-700 mb-2">Room Name</label>
+                    <input 
+                        type="text" 
+                        id="roomNameInput" 
+                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        placeholder="Enter room name"
+                    >
+                </div>
+                <button 
+                    id="joinRoomBtn" 
+                    class="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200"
+                >
+                    Join Room
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Chat Interface -->
+        <div id="chatInterface" class="hidden">
+            <!-- Controls -->
+            <div class="bg-white rounded-lg shadow-lg p-4 mb-6">
+                <div class="flex flex-wrap gap-4 items-center justify-between">
+                    <div class="flex gap-2">
+                        <button 
+                            id="toggleVideo" 
+                            class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200"
+                        >
+                            📹 Video On
+                        </button>
+                        <button 
+                            id="toggleAudio" 
+                            class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200"
+                        >
+                            🎤 Audio On
+                        </button>
+                    </div>
+                    <div class="text-sm text-gray-600">
+                        <span>Your ID: <code id="myPeerId" class="bg-gray-100 px-2 py-1 rounded">-</code></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Video Grid -->
+            <div class="bg-white rounded-lg shadow-lg p-4 mb-6">
+                <h3 class="text-xl font-semibold mb-4 text-gray-800">Video Streams</h3>
+                <div id="videoGrid" class="video-grid">
+                    <div>
+                        <p class="text-sm text-gray-600 mb-2">You</p>
+                        <video id="localVideo" autoplay muted playsinline></video>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Text Chat -->
+            <div class="bg-white rounded-lg shadow-lg p-4">
+                <h3 class="text-xl font-semibold mb-4 text-gray-800">Chat</h3>
+                <div id="chatMessages" class="chat-messages bg-gray-50 rounded-lg p-4 mb-4 space-y-2">
+                    <p class="text-gray-500 text-sm italic">No messages yet. Start chatting!</p>
+                </div>
+                <div class="flex gap-2">
+                    <input 
+                        type="text" 
+                        id="messageInput" 
+                        class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        placeholder="Type a message..."
+                    >
+                    <button 
+                        id="sendMessage" 
+                        class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-6 rounded-lg transition duration-200"
+                    >
+                        Send
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Messages -->
+        <div id="statusMessage" class="fixed bottom-4 right-4 bg-blue-500 text-white px-6 py-3 rounded-lg shadow-lg hidden">
+            <p id="statusText"></p>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const PEERJS_CONFIG = {
+            host: 'peerjs-server.herokuapp.com',
+            secure: true,
+            port: 443,
+            debug: 2
+        };
+
+        // State
+        let peer = null;
+        let localStream = null;
+        let connections = new Map(); // peerId -> {conn, call, video}
+        let roomName = null;
+        let isVideoEnabled = true;
+        let isAudioEnabled = true;
+
+        // DOM Elements
+        const roomEntry = document.getElementById('roomEntry');
+        const chatInterface = document.getElementById('chatInterface');
+        const roomInfo = document.getElementById('roomInfo');
+        const roomNameInput = document.getElementById('roomNameInput');
+        const joinRoomBtn = document.getElementById('joinRoomBtn');
+        const localVideo = document.getElementById('localVideo');
+        const videoGrid = document.getElementById('videoGrid');
+        const chatMessages = document.getElementById('chatMessages');
+        const messageInput = document.getElementById('messageInput');
+        const sendMessage = document.getElementById('sendMessage');
+        const toggleVideo = document.getElementById('toggleVideo');
+        const toggleAudio = document.getElementById('toggleAudio');
+        const myPeerId = document.getElementById('myPeerId');
+        const statusMessage = document.getElementById('statusMessage');
+        const statusText = document.getElementById('statusText');
+
+        // Utility Functions
+        function showStatus(message, duration = 3000) {
+            statusText.textContent = message;
+            statusMessage.classList.remove('hidden');
+            setTimeout(() => {
+                statusMessage.classList.add('hidden');
+            }, duration);
+        }
+
+        function getRoomFromURL() {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('room');
+        }
+
+        function setRoomInURL(room) {
+            const url = new URL(window.location);
+            url.searchParams.set('room', room);
+            window.history.pushState({}, '', url);
+        }
+
+        function addChatMessage(sender, message) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'p-2 rounded-lg ' + (sender === 'You' ? 'bg-blue-100' : 'bg-gray-200');
+            messageDiv.innerHTML = `<strong class="text-sm">${sender}:</strong> <span class="text-sm">${escapeHtml(message)}</span>`;
+            
+            if (chatMessages.firstChild && chatMessages.firstChild.classList.contains('text-gray-500')) {
+                chatMessages.innerHTML = '';
+            }
+            
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function generateRoomBasedPeerId(room) {
+            return `${room}-${Math.random().toString(36).substr(2, 9)}`;
+        }
+
+        // Media Functions
+        async function initializeMedia() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: true
+                });
+                localVideo.srcObject = localStream;
+                showStatus('Media initialized successfully');
+            } catch (error) {
+                console.error('Error accessing media devices:', error);
+                showStatus('Error accessing camera/microphone', 5000);
+            }
+        }
+
+        function toggleVideoState() {
+            if (localStream) {
+                const videoTrack = localStream.getVideoTracks()[0];
+                if (videoTrack) {
+                    isVideoEnabled = !isVideoEnabled;
+                    videoTrack.enabled = isVideoEnabled;
+                    toggleVideo.textContent = isVideoEnabled ? '📹 Video On' : '📹 Video Off';
+                    toggleVideo.className = isVideoEnabled 
+                        ? 'bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200'
+                        : 'bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200';
+                }
+            }
+        }
+
+        function toggleAudioState() {
+            if (localStream) {
+                const audioTrack = localStream.getAudioTracks()[0];
+                if (audioTrack) {
+                    isAudioEnabled = !isAudioEnabled;
+                    audioTrack.enabled = isAudioEnabled;
+                    toggleAudio.textContent = isAudioEnabled ? '🎤 Audio On' : '🎤 Audio Off';
+                    toggleAudio.className = isAudioEnabled 
+                        ? 'bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200'
+                        : 'bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200';
+                }
+            }
+        }
+
+        // PeerJS Functions
+        function initializePeer(room) {
+            const peerId = generateRoomBasedPeerId(room);
+            peer = new Peer(peerId, PEERJS_CONFIG);
+
+            peer.on('open', (id) => {
+                console.log('My peer ID is:', id);
+                myPeerId.textContent = id;
+                showStatus('Connected to signaling server');
+                
+                // Try to discover other peers in the room
+                discoverPeers(room);
+            });
+
+            peer.on('connection', (conn) => {
+                handleIncomingConnection(conn);
+            });
+
+            peer.on('call', (call) => {
+                handleIncomingCall(call);
+            });
+
+            peer.on('error', (error) => {
+                console.error('Peer error:', error);
+                showStatus('Connection error: ' + error.type, 5000);
+            });
+        }
+
+        function handleIncomingConnection(conn) {
+            conn.on('open', () => {
+                console.log('Data connection opened with:', conn.peer);
+                
+                if (!connections.has(conn.peer)) {
+                    connections.set(conn.peer, { conn });
+                } else {
+                    connections.get(conn.peer).conn = conn;
+                }
+
+                // Send welcome message
+                conn.send({
+                    type: 'welcome',
+                    peerId: peer.id,
+                    room: roomName
+                });
+
+                showStatus(`Connected to peer: ${conn.peer}`);
+            });
+
+            conn.on('data', (data) => {
+                handleIncomingData(conn.peer, data);
+            });
+
+            conn.on('close', () => {
+                console.log('Connection closed with:', conn.peer);
+                removePeer(conn.peer);
+            });
+        }
+
+        function handleIncomingCall(call) {
+            console.log('Incoming call from:', call.peer);
+            
+            call.answer(localStream);
+            
+            call.on('stream', (remoteStream) => {
+                console.log('Received remote stream from:', call.peer);
+                addRemoteVideo(call.peer, remoteStream);
+                
+                if (!connections.has(call.peer)) {
+                    connections.set(call.peer, { call });
+                } else {
+                    connections.get(call.peer).call = call;
+                }
+            });
+
+            call.on('close', () => {
+                console.log('Call closed with:', call.peer);
+                removePeer(call.peer);
+            });
+
+            call.on('error', (error) => {
+                console.error('Call error:', error);
+            });
+        }
+
+        function handleIncomingData(peerId, data) {
+            console.log('Received data from', peerId, ':', data);
+            
+            if (data.type === 'chat') {
+                addChatMessage(peerId.split('-')[0], data.message);
+            } else if (data.type === 'welcome') {
+                showStatus(`${data.peerId} joined the room`);
+            } else if (data.type === 'peer-discovery') {
+                // Another peer is announcing itself
+                connectToPeer(peerId);
+            }
+        }
+
+        function connectToPeer(peerId) {
+            if (peerId === peer.id || connections.has(peerId)) {
+                return;
+            }
+
+            console.log('Connecting to peer:', peerId);
+
+            // Establish data connection
+            const conn = peer.connect(peerId);
+            
+            conn.on('open', () => {
+                console.log('Connected to:', peerId);
+                
+                if (!connections.has(peerId)) {
+                    connections.set(peerId, { conn });
+                } else {
+                    connections.get(peerId).conn = conn;
+                }
+
+                // Send greeting
+                conn.send({
+                    type: 'welcome',
+                    peerId: peer.id,
+                    room: roomName
+                });
+            });
+
+            conn.on('data', (data) => {
+                handleIncomingData(peerId, data);
+            });
+
+            conn.on('close', () => {
+                console.log('Connection closed with:', peerId);
+                removePeer(peerId);
+            });
+
+            // Establish call connection
+            if (localStream) {
+                const call = peer.call(peerId, localStream);
+                
+                call.on('stream', (remoteStream) => {
+                    console.log('Received remote stream from:', peerId);
+                    addRemoteVideo(peerId, remoteStream);
+                    
+                    if (!connections.has(peerId)) {
+                        connections.set(peerId, { call });
+                    } else {
+                        connections.get(peerId).call = call;
+                    }
+                });
+
+                call.on('close', () => {
+                    console.log('Call closed with:', peerId);
+                    removePeer(peerId);
+                });
+
+                call.on('error', (error) => {
+                    console.error('Call error:', error);
+                });
+            }
+        }
+
+        function addRemoteVideo(peerId, stream) {
+            // Check if video element already exists
+            let videoContainer = document.getElementById(`video-${peerId}`);
+            
+            if (!videoContainer) {
+                videoContainer = document.createElement('div');
+                videoContainer.id = `video-${peerId}`;
+                
+                const label = document.createElement('p');
+                label.className = 'text-sm text-gray-600 mb-2';
+                label.textContent = peerId.split('-')[0];
+                
+                const video = document.createElement('video');
+                video.autoplay = true;
+                video.playsinline = true;
+                video.srcObject = stream;
+                
+                videoContainer.appendChild(label);
+                videoContainer.appendChild(video);
+                videoGrid.appendChild(videoContainer);
+
+                if (connections.has(peerId)) {
+                    connections.get(peerId).video = videoContainer;
+                } else {
+                    connections.set(peerId, { video: videoContainer });
+                }
+            } else {
+                // Update existing video
+                const video = videoContainer.querySelector('video');
+                if (video) {
+                    video.srcObject = stream;
+                }
+            }
+        }
+
+        function removePeer(peerId) {
+            const peerData = connections.get(peerId);
+            if (peerData) {
+                if (peerData.video) {
+                    peerData.video.remove();
+                }
+                if (peerData.conn) {
+                    peerData.conn.close();
+                }
+                if (peerData.call) {
+                    peerData.call.close();
+                }
+                connections.delete(peerId);
+            }
+            showStatus(`Peer disconnected: ${peerId}`);
+        }
+
+        function broadcastMessage(message) {
+            const data = {
+                type: 'chat',
+                message: message,
+                sender: peer.id
+            };
+
+            connections.forEach((peerData) => {
+                if (peerData.conn && peerData.conn.open) {
+                    peerData.conn.send(data);
+                }
+            });
+        }
+
+        function discoverPeers(room) {
+            // This is a simplified peer discovery mechanism
+            // In a production app, you would use a signaling server to manage room membership
+            console.log('Discovering peers in room:', room);
+            
+            // Broadcast our presence
+            const discoveryMessage = {
+                type: 'peer-discovery',
+                peerId: peer.id,
+                room: room
+            };
+
+            // Store our peer ID in localStorage for other tabs to discover
+            const roomPeers = JSON.parse(localStorage.getItem(`room-${room}`) || '[]');
+            
+            // Connect to existing peers
+            roomPeers.forEach(existingPeerId => {
+                if (existingPeerId !== peer.id) {
+                    setTimeout(() => connectToPeer(existingPeerId), 1000);
+                }
+            });
+
+            // Add ourselves to the room
+            if (!roomPeers.includes(peer.id)) {
+                roomPeers.push(peer.id);
+                localStorage.setItem(`room-${room}`, JSON.stringify(roomPeers));
+            }
+
+            // Clean up on page unload
+            window.addEventListener('beforeunload', () => {
+                const currentPeers = JSON.parse(localStorage.getItem(`room-${room}`) || '[]');
+                const updatedPeers = currentPeers.filter(id => id !== peer.id);
+                localStorage.setItem(`room-${room}`, JSON.stringify(updatedPeers));
+            });
+        }
+
+        // Event Listeners
+        joinRoomBtn.addEventListener('click', () => {
+            const room = roomNameInput.value.trim();
+            if (room) {
+                setRoomInURL(room);
+                startRoom(room);
+            }
+        });
+
+        roomNameInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                joinRoomBtn.click();
+            }
+        });
+
+        toggleVideo.addEventListener('click', toggleVideoState);
+        toggleAudio.addEventListener('click', toggleAudioState);
+
+        sendMessage.addEventListener('click', () => {
+            const message = messageInput.value.trim();
+            if (message) {
+                addChatMessage('You', message);
+                broadcastMessage(message);
+                messageInput.value = '';
+            }
+        });
+
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage.click();
+            }
+        });
+
+        // Initialization
+        async function startRoom(room) {
+            roomName = room;
+            roomInfo.textContent = `Room: ${room}`;
+            roomEntry.classList.add('hidden');
+            chatInterface.classList.remove('hidden');
+
+            await initializeMedia();
+            initializePeer(room);
+        }
+
+        // Check for room in URL on load
+        window.addEventListener('DOMContentLoaded', () => {
+            const room = getRoomFromURL();
+            if (room) {
+                startRoom(room);
+            } else {
+                roomEntry.classList.remove('hidden');
+                roomInfo.textContent = 'Enter a room name to get started';
+            }
+        });
+    </script>
+</body>
+</html>
