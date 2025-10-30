@@ -193,7 +193,7 @@
         }
 
         function generateRoomBasedPeerId(room) {
-            return `${room}-${Math.random().toString(36).substr(2, 9)}`;
+            return `${room}-${Math.random().toString(36).substring(2, 11)}`;
         }
 
         // Media Functions
