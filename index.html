@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simple PeerJS Video Chat</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <style>
+    video {
+      width: 100%;
+      max-width: 400px;
+      border-radius: 8px;
+      background: #000;
+    }
+  </style>
+</head>
+<body class="bg-gray-100 flex flex-col items-center py-8">
+  <h1 class="text-3xl font-bold mb-4">Simple PeerJS Chat</h1>
+
+  <!-- Room join -->
+  <div id="join" class="bg-white p-4 rounded shadow-md mb-6">
+    <input id="roomInput" type="text" placeholder="Enter room name"
+           class="border px-3 py-2 rounded w-64 mr-2">
+    <button id="joinBtn" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded">
+      Join Room
+    </button>
+  </div>
+
+  <!-- Main chat interface -->
+  <div id="chat" class="hidden w-full max-w-3xl">
+    <p id="info" class="text-gray-600 mb-4"></p>
+
+    <div class="grid grid-cols-2 gap-4 mb-6">
+      <div>
+        <p class="font-semibold mb-1">You</p>
+        <video id="localVideo" autoplay muted playsinline></video>
+      </div>
+      <div>
+        <p class="font-semibold mb-1">Remote</p>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+    </div>
+
+    <div class="bg-white rounded shadow-md p-4">
+      <div id="messages" class="h-48 overflow-y-auto border rounded p-2 mb-2 text-sm"></div>
+      <div class="flex gap-2">
+        <input id="msgInput" type="text" placeholder="Type a message..."
+               class="flex-1 border px-3 py-2 rounded">
+        <button id="sendBtn" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded">
+          Send
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /**
+     * -------------------------------
+     * 1. BASIC SETUP AND STATE
+     * -------------------------------
+     */
+
+    const PEER_CONFIG = { host: '0.peerjs.com', port: 443, secure: true };
+
+    let peer = null;         // Our PeerJS instance
+    let localStream = null;  // Our webcam/mic stream
+    let conn = null;         // Data connection for text chat
+    let call = null;         // Media call
+    let roomName = null;
+
+    const joinDiv = document.getElementById('join');
+    const chatDiv = document.getElementById('chat');
+    const info = document.getElementById('info');
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const msgInput = document.getElementById('msgInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const messages = document.getElementById('messages');
+
+    /**
+     * -------------------------------
+     * 2. JOIN ROOM BUTTON HANDLER
+     * -------------------------------
+     */
+    document.getElementById('joinBtn').onclick = async () => {
+      roomName = document.getElementById('roomInput').value.trim();
+      if (!roomName) return alert('Enter a room name');
+
+      joinDiv.classList.add('hidden');
+      chatDiv.classList.remove('hidden');
+      info.textContent = `Room: ${roomName}`;
+
+      await setupMedia();
+      setupPeer();
+    };
+
+    /**
+     * -------------------------------
+     * 3. SETUP MEDIA (CAMERA + MIC)
+     * -------------------------------
+     */
+    async function setupMedia() {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+      } catch (err) {
+        console.error('Media error:', err);
+        alert('Could not access camera/mic');
+      }
+    }
+
+    /**
+     * -------------------------------
+     * 4. INITIALIZE PEERJS CONNECTION
+     * -------------------------------
+     */
+    function setupPeer() {
+      // Give each peer a random suffix so multiple people can join the same "room"
+      const myId = `${roomName}-${Math.random().toString(36).substring(2, 8)}`;
+      peer = new Peer(myId, PEER_CONFIG);
+
+      peer.on('open', (id) => {
+        console.log('Connected as:', id);
+        info.textContent += ` | Your ID: ${id}`;
+      });
+
+      // Handle incoming data connection (chat)
+      peer.on('connection', (incoming) => {
+        conn = incoming;
+        conn.on('data', (msg) => addMessage('Peer', msg));
+      });
+
+      // Handle incoming media call
+      peer.on('call', (incomingCall) => {
+        incomingCall.answer(localStream);
+        incomingCall.on('stream', (remoteStream) => {
+          remoteVideo.srcObject = remoteStream;
+        });
+        call = incomingCall;
+      });
+
+      // When we’re ready, attempt to connect to existing peers
+      peer.on('open', () => discoverPeer());
+    }
+
+    /**
+     * -------------------------------
+     * 5. FIND ANOTHER PEER IN ROOM
+     * -------------------------------
+     *
+     * In a real app, you'd use a signaling server
+     * to know who’s in the room. For demo purposes,
+     * we just try random peers that start with the
+     * same room name prefix.
+     */
+    function discoverPeer() {
+      // Try connecting to another peer manually
+      // (You can share your PeerID with a friend)
+      const promptPeerId = prompt('Enter another peer ID to connect (or leave blank to wait):');
+      if (promptPeerId) connectToPeer(promptPeerId);
+    }
+
+    /**
+     * -------------------------------
+     * 6. CONNECT TO A PEER
+     * -------------------------------
+     */
+    function connectToPeer(peerId) {
+      // Data connection (chat)
+      conn = peer.connect(peerId);
+      conn.on('open', () => {
+        addMessage('System', `Connected to ${peerId}`);
+      });
+      conn.on('data', (msg) => addMessage('Peer', msg));
+
+      // Media call
+      call = peer.call(peerId, localStream);
+      call.on('stream', (remoteStream) => {
+        remoteVideo.srcObject = remoteStream;
+      });
+    }
+
+    /**
+     * -------------------------------
+     * 7. CHAT MESSAGING
+     * -------------------------------
+     */
+    sendBtn.onclick = () => {
+      const text = msgInput.value.trim();
+      if (!text || !conn) return;
+      conn.send(text);
+      addMessage('You', text);
+      msgInput.value = '';
+    };
+
+    function addMessage(sender, text) {
+      const div = document.createElement('div');
+      div.textContent = `${sender}: ${text}`;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+    }
+  </script>
+</body>
+</html>
